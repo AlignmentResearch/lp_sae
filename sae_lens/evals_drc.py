@@ -1,6 +1,5 @@
 import argparse
 import re
-from dataclasses import dataclass
 from functools import partial
 from typing import Any, Mapping
 
@@ -14,7 +13,7 @@ from transformer_lens.hook_points import HookedRootModule
 from sae_lens.sae import SAE
 from sae_lens.toolkit.pretrained_saes_directory import get_pretrained_saes_directory
 from sae_lens.training.activations_store import ActivationsStore
-from sae_lens.evals import EvalConfig
+from sae_lens.evals import EvalConfig, get_eval_everything_config
 from learned_planners.interp.utils import play_level, run_fn_with_cache
 from cleanba.environments import BoxobanConfig, EnvpoolBoxobanConfig
 import os
@@ -468,7 +467,8 @@ def get_recons_loss(
     #     fwd_hooks=[(hook_name, partial(replacement_hook))],
     # )
     N = original_obs.shape[1]
-    state, eps_start = model.recurrent_initial_state(N), torch.zeros(original_obs.shape[:2], dtype=torch.bool)
+    state = model.recurrent_initial_state(N, device=model.device)
+    eps_start = torch.zeros(original_obs.shape[:2], dtype=torch.bool, device=model.device)
     fwd_hooks = [(hook_name, partial(replacement_hook))]
     (distribution, _), _ = run_fn_with_cache(
         model,
