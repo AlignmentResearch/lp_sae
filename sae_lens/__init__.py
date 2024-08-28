@@ -6,6 +6,7 @@ from .cache_activations_runner import CacheActivationsRunner
 from .config import (
     CacheActivationsRunnerConfig,
     LanguageModelSAERunnerConfig,
+    DRCSAERunnerConfig,
     PretokenizeRunnerConfig,
 )
 from .evals import run_evals
@@ -24,6 +25,7 @@ __all__ = [
     "HookedSAETransformer",
     "ActivationsStore",
     "LanguageModelSAERunnerConfig",
+    "DRCSAERunnerConfig",
     "SAETrainingRunner",
     "CacheActivationsRunnerConfig",
     "CacheActivationsRunner",

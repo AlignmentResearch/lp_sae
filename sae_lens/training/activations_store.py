@@ -23,9 +23,12 @@ from sae_lens.config import (
     CacheActivationsRunnerConfig,
     HfDataset,
     LanguageModelSAERunnerConfig,
+    DRCSAERunnerConfig,
 )
 from sae_lens.sae import SAE
 from sae_lens.tokenization_and_batching import concat_and_batch_sequences
+
+from learned_planners.interp.train_probes import ActivationsDataset, DatasetStore
 
 
 # TODO: Make an activation store config class to be consistent with the rest of the code.
@@ -192,6 +195,8 @@ class ActivationsStore:
 
         self.estimated_norm_scaling_factor = 1.0
 
+        if self.dataset is None: # will be None when using DRCActivationsStore
+            return
         # Check if dataset is tokenized
         dataset_sample = next(iter(self.dataset))
 
@@ -653,6 +658,120 @@ class ActivationsStore:
 
     def save(self, file_path: str):
         save_file(self.state_dict(), file_path)
+
+
+class DRCActivationsStore(ActivationsStore):
+    """Activations store for DRC models."""
+
+    def __init__(
+        self,
+        grid_wise: bool,
+        model: HookedRootModule,
+        dataset: HfDataset | str,
+        streaming: bool,
+        hook_name: str,
+        hook_layer: int,
+        hook_head_index: int | None,
+        context_size: int,
+        d_in: int,
+        n_batches_in_buffer: int,
+        total_training_tokens: int,
+        store_batch_size_prompts: int,
+        train_batch_size_tokens: int,
+        prepend_bos: bool,
+        normalize_activations: str,
+        device: torch.device,
+        dtype: str,
+        cached_activations_path: str | None = None,
+        model_kwargs: dict[str, Any] | None = None,
+        autocast_lm: bool = False,
+        dataset_trust_remote_code: bool | None = None,
+    ):
+        self.grid_wise = grid_wise
+
+        super().__init__(
+            model=model,
+            dataset=dataset,
+            streaming=streaming,
+            hook_name=hook_name,
+            hook_layer=hook_layer,
+            hook_head_index=hook_head_index,
+            context_size=context_size,
+            d_in=d_in,
+            n_batches_in_buffer=n_batches_in_buffer,
+            total_training_tokens=total_training_tokens,
+            store_batch_size_prompts=store_batch_size_prompts,
+            train_batch_size_tokens=train_batch_size_tokens,
+            prepend_bos=prepend_bos,
+            normalize_activations=normalize_activations,
+            device=device,
+            dtype=dtype,
+            cached_activations_path=cached_activations_path,
+            model_kwargs=model_kwargs,
+            autocast_lm=autocast_lm,
+            dataset_trust_remote_code=dataset_trust_remote_code,
+        )
+
+        assert cached_activations_path is not None
+        self.load_cached_activations()
+
+    @classmethod
+    def from_config(
+        cls,
+        model: HookedRootModule,
+        cfg: DRCSAERunnerConfig,
+        override_dataset: HfDataset | None = None,
+    ) -> "DRCActivationsStore":
+        return cls(
+            grid_wise=cfg.grid_wise,
+            model=model,
+            dataset=override_dataset or cfg.dataset_path,
+            streaming=cfg.streaming,
+            hook_name=cfg.hook_name,
+            hook_layer=cfg.hook_layer,
+            hook_head_index=cfg.hook_head_index,
+            context_size=cfg.context_size,
+            d_in=cfg.d_in,
+            n_batches_in_buffer=cfg.n_batches_in_buffer,
+            total_training_tokens=cfg.training_tokens,
+            store_batch_size_prompts=cfg.store_batch_size_prompts,
+            train_batch_size_tokens=cfg.train_batch_size_tokens,
+            prepend_bos=cfg.prepend_bos,
+            normalize_activations=cfg.normalize_activations,
+            device=torch.device(cfg.act_store_device),
+            dtype=cfg.dtype,
+            cached_activations_path=cfg.cached_activations_path,
+            model_kwargs=cfg.model_kwargs,
+            autocast_lm=cfg.autocast_lm,
+            dataset_trust_remote_code=cfg.dataset_trust_remote_code,
+        )
+
+    def load_cached_activations(self) -> torch.Tensor:
+        self.acts_ds = ActivationsDataset(self.cached_activations_path, keys=[self.hook_name], num_data_points=self.total_training_tokens, load_data=False,)
+        self.activations = self.acts_ds.load_only_activations(grid_wise=self.grid_wise)[self.hook_name]
+        self.activations_idx = 0
+        assert self.activations.shape == (self.total_training_tokens, self.d_in)
+
+    @torch.no_grad()
+    def get_buffer(
+        self, n_batches_in_buffer: int, raise_on_epoch_end: bool = False
+    ) -> torch.Tensor:
+        if self.activations is None:
+            raise RuntimeError("Activations not loaded yet")
+        context_size = self.context_size
+        batch_size = self.store_batch_size_prompts
+        d_in = self.d_in
+        total_size = batch_size * n_batches_in_buffer * context_size
+
+        if self.activations_idx + total_size > self.total_training_tokens:
+            if raise_on_epoch_end:
+                raise StopIteration("End of epoch")
+            else:
+                self.activations_idx = 0
+        res = self.activations[self.activations_idx : self.activations_idx + total_size][:, None]
+        self.activations_idx += total_size
+        assert res.shape == (total_size, 1, d_in)
+        return torch.tensor(res, device=self.device, dtype=self.dtype)
 
 
 def validate_pretokenized_dataset_tokenizer(

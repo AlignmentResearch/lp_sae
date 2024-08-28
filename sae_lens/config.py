@@ -420,6 +420,24 @@ class LanguageModelSAERunnerConfig:
 
 
 @dataclass
+class DRCSAERunnerConfig(LanguageModelSAERunnerConfig):
+    """Configuration for training a sparse autoencoder on a DRC network."""
+
+    grid_wise: bool = True
+    num_envs: int = 1  # Number of environments to use during evaluation
+    envpool: bool = True  # Whether to use the Envpool environment
+
+    def __post_init__(self):
+        self.use_cached_activations = True # DRC SAEs require cached activations
+        assert self.cached_activations_path is not None, "cached_activations_path must be set for DRC SAEs"
+        self.dataset_path = None
+        super().__post_init__()
+
+        if self.grid_wise:
+            self.run_name = f"{self.run_name}-Gridwise"
+
+
+@dataclass
 class CacheActivationsRunnerConfig:
     """
     Configuration for caching activations of an LLM.
