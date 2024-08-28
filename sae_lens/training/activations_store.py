@@ -29,7 +29,7 @@ from sae_lens.sae import SAE
 from sae_lens.tokenization_and_batching import concat_and_batch_sequences
 
 from learned_planners.interp.train_probes import ActivationsDataset, DatasetStore
-
+import wandb
 
 # TODO: Make an activation store config class to be consistent with the rest of the code.
 class ActivationsStore:
@@ -688,6 +688,7 @@ class DRCActivationsStore(ActivationsStore):
         dataset_trust_remote_code: bool | None = None,
     ):
         self.grid_wise = grid_wise
+        self.current_epoch = -1
 
         super().__init__(
             model=model,
@@ -747,9 +748,16 @@ class DRCActivationsStore(ActivationsStore):
         )
 
     def load_cached_activations(self) -> torch.Tensor:
-        self.acts_ds = ActivationsDataset(self.cached_activations_path, keys=[self.hook_name], num_data_points=self.total_training_tokens, load_data=False,)
-        self.activations = self.acts_ds.load_only_activations(grid_wise=self.grid_wise)[self.hook_name]
-        self.activations = torch.tensor(self.activations[:, None], dtype=self.dtype)
+        cache_file = f"{self.hook_name}-{self.total_training_tokens//1e6}M-{'gridwise' if self.grid_wise else ''}.safetensors"
+        cache_file = f"{self.cached_activations_path}/{cache_file}"
+        self.acts_ds = ActivationsDataset(self.cached_activations_path, keys=[self.hook_name], num_data_points=self.total_training_tokens, load_data=False)
+        if os.path.exists(cache_file):
+            print(f"Loading from cache file {cache_file}")
+            self.activations = self.load_buffer(cache_file)
+        else:
+            self.activations = self.acts_ds.load_only_activations(grid_wise=self.grid_wise)[self.hook_name]
+            self.activations = torch.tensor(self.activations[:, None], dtype=self.dtype)
+            self.save_buffer(self.activations, cache_file)
         assert self.activations.shape == (self.total_training_tokens, 1, self.d_in)
 
     @torch.no_grad()
@@ -782,6 +790,8 @@ class DRCActivationsStore(ActivationsStore):
                 collate_fn=lambda x: torch.stack(x).to(self.device),
             )
         )
+        self.current_epoch += 1
+        wandb.log({"epoch": self.current_epoch})
         return dataloader
 
 

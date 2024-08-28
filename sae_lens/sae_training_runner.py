@@ -72,6 +72,8 @@ class SAETrainingRunner:
             self.cfg,
             override_dataset=override_dataset,
         )
+        if is_drc:
+            self.cfg.training_tokens *= self.cfg.epochs
 
         if self.cfg.from_pretrained_path is not None:
             self.sae = TrainingSAE.load_from_pretrained(

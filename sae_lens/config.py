@@ -424,6 +424,7 @@ class DRCSAERunnerConfig(LanguageModelSAERunnerConfig):
     """Configuration for training a sparse autoencoder on a DRC network."""
 
     grid_wise: bool = True
+    epochs: int = 1  # Number of epochs to train for
     num_envs: int = 1  # Number of environments to use during evaluation
     envpool: bool = True  # Whether to use the Envpool environment
 
@@ -434,7 +435,7 @@ class DRCSAERunnerConfig(LanguageModelSAERunnerConfig):
         super().__post_init__()
 
         if self.grid_wise:
-            self.run_name = f"{self.run_name}-Gridwise"
+            self.run_name = f"{self.run_name}-Epochs-{self.epochs}-GridWise"
 
 
 @dataclass
