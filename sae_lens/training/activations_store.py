@@ -696,11 +696,11 @@ class DRCActivationsStore(ActivationsStore):
             hook_name=hook_name,
             hook_layer=hook_layer,
             hook_head_index=hook_head_index,
-            context_size=context_size,
+            context_size=1,
             d_in=d_in,
-            n_batches_in_buffer=n_batches_in_buffer,
+            n_batches_in_buffer=1,
             total_training_tokens=total_training_tokens,
-            store_batch_size_prompts=store_batch_size_prompts,
+            store_batch_size_prompts=1,
             train_batch_size_tokens=train_batch_size_tokens,
             prepend_bos=prepend_bos,
             normalize_activations=normalize_activations,
@@ -749,29 +749,40 @@ class DRCActivationsStore(ActivationsStore):
     def load_cached_activations(self) -> torch.Tensor:
         self.acts_ds = ActivationsDataset(self.cached_activations_path, keys=[self.hook_name], num_data_points=self.total_training_tokens, load_data=False,)
         self.activations = self.acts_ds.load_only_activations(grid_wise=self.grid_wise)[self.hook_name]
-        self.activations_idx = 0
-        assert self.activations.shape == (self.total_training_tokens, self.d_in)
+        self.activations = torch.tensor(self.activations[:, None], dtype=self.dtype)
+        assert self.activations.shape == (self.total_training_tokens, 1, self.d_in)
 
     @torch.no_grad()
     def get_buffer(
         self, n_batches_in_buffer: int, raise_on_epoch_end: bool = False
     ) -> torch.Tensor:
-        if self.activations is None:
-            raise RuntimeError("Activations not loaded yet")
-        context_size = self.context_size
-        batch_size = self.store_batch_size_prompts
-        d_in = self.d_in
-        total_size = batch_size * n_batches_in_buffer * context_size
+        try:
+            return self.activations
+        except AttributeError:
+            raise ValueError("Cached activations must be loaded before calling get_buffer.")
+    
+    def get_data_loader(
+        self,
+    ) -> Iterator[Any]:
+        """
+        Return a torch.utils.dataloader which you can get batches from.
 
-        if self.activations_idx + total_size > self.total_training_tokens:
-            if raise_on_epoch_end:
-                raise StopIteration("End of epoch")
-            else:
-                self.activations_idx = 0
-        res = self.activations[self.activations_idx : self.activations_idx + total_size][:, None]
-        self.activations_idx += total_size
-        assert res.shape == (total_size, 1, d_in)
-        return torch.tensor(res, device=self.device, dtype=self.dtype)
+        Should automatically refill the buffer when it gets to n % full.
+        (better mixing if you refill and shuffle regularly).
+
+        """
+        batch_size = self.train_batch_size_tokens
+        new_samples = self.get_buffer(self.half_buffer_size, raise_on_epoch_end=True)
+        dataloader = iter(
+            DataLoader(
+                # TODO: seems like a typing bug?
+                cast(Any, new_samples),
+                batch_size=batch_size,
+                shuffle=True,
+                collate_fn=lambda x: torch.stack(x).to(self.device),
+            )
+        )
+        return dataloader
 
 
 def validate_pretokenized_dataset_tokenizer(

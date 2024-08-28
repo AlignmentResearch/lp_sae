@@ -298,17 +298,18 @@ def get_recons_loss(
     boxo_cfg = env_cls(**env_kwargs)
     boxo_env = boxo_cfg.make()
 
+    hook_name += ".0.2"
     original_obs, _, original_logits, _, _, _, cache, _ = play_level(
         boxo_env,
         model,
         max_steps=100,
         fwd_hooks=None,
+        names_filter=[hook_name],
     )
     metric_dict = {}
     # we would include hook z, except that we now have base SAE's
     # which will do their own reshaping for hook z.
     has_head_dim_key_substrings = ["hook_q", "hook_k", "hook_v", "hook_z"]
-    hook_name += ".0.2"
     if head_index is not None:
         original_act = cache[hook_name][:, :, head_index]
     elif any(substring in hook_name for substring in has_head_dim_key_substrings):
@@ -460,12 +461,6 @@ def get_recons_loss(
         replacement_hook = standard_replacement_hook
         zero_ablate_hook = standard_zero_ablate_hook
 
-    # _, _, recons_logits, _, _, recons_solves, _, _ = play_level(
-    #     boxo_env,
-    #     model,
-    #     max_steps=100,
-    #     fwd_hooks=[(hook_name, partial(replacement_hook))],
-    # )
     N = original_obs.shape[1]
     state = model.recurrent_initial_state(N, device=model.device)
     eps_start = torch.zeros(original_obs.shape[:2], dtype=torch.bool, device=model.device)
