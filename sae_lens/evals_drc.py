@@ -298,24 +298,24 @@ def get_recons_loss(
     boxo_cfg = env_cls(**env_kwargs)
     boxo_env = boxo_cfg.make()
 
-    hook_name += ".0.2"
+    hook_name_last_int_pos = hook_name + ".0.2"
     original_obs, _, original_logits, _, _, _, cache, _ = play_level(
         boxo_env,
         model,
         max_steps=100,
         fwd_hooks=None,
-        names_filter=[hook_name],
+        names_filter=[hook_name_last_int_pos],
     )
     metric_dict = {}
     # we would include hook z, except that we now have base SAE's
     # which will do their own reshaping for hook z.
     has_head_dim_key_substrings = ["hook_q", "hook_k", "hook_v", "hook_z"]
     if head_index is not None:
-        original_act = cache[hook_name][:, :, head_index]
+        original_act = cache[hook_name_last_int_pos][:, :, head_index]
     elif any(substring in hook_name for substring in has_head_dim_key_substrings):
-        original_act = cache[hook_name].flatten(-2, -1)
+        original_act = cache[hook_name_last_int_pos].flatten(-2, -1)
     else:
-        original_act = cache[hook_name]
+        original_act = cache[hook_name_last_int_pos]
     original_act = activation_store.acts_ds.process_cache_for_sae(original_act, grid_wise=activation_store.grid_wise)
 
     # normalise if necessary (necessary in training only, otherwise we should fold the scaling in)
@@ -464,7 +464,9 @@ def get_recons_loss(
     N = original_obs.shape[1]
     state = model.recurrent_initial_state(N, device=model.device)
     eps_start = torch.zeros(original_obs.shape[:2], dtype=torch.bool, device=model.device)
-    fwd_hooks = [(hook_name, partial(replacement_hook))]
+    all_hook_names = [hook_name + f".{pos}.{int_pos}" for pos in range(len(original_obs)) for int_pos in range(3)]
+
+    fwd_hooks = [(pos_hook_name, replacement_hook) for pos_hook_name in all_hook_names]
     (distribution, _), _ = run_fn_with_cache(
         model,
         "get_distribution",
@@ -476,7 +478,7 @@ def get_recons_loss(
     )
     recons_logits = distribution.distribution.logits
 
-    fwd_hooks = [(hook_name, zero_ablate_hook)]
+    fwd_hooks = [(pos_hook_name, zero_ablate_hook) for pos_hook_name in all_hook_names]
     (distribution, _), _ = run_fn_with_cache(
         model,
         "get_distribution",

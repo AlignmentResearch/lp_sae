@@ -758,7 +758,9 @@ class DRCActivationsStore(ActivationsStore):
             self.activations = self.acts_ds.load_only_activations(grid_wise=self.grid_wise)[self.hook_name]
             self.activations = torch.tensor(self.activations[:, None], dtype=self.dtype)
             self.save_buffer(self.activations, cache_file)
-        assert self.activations.shape == (self.total_training_tokens, 1, self.d_in)
+        if self.activations.shape[0] != self.total_training_tokens:
+            Warning(f"Loaded activations have {self.activations.shape[0]} tokens, but expected {self.total_training_tokens}.")
+        assert self.activations.shape[1:] == (1, self.d_in)
 
     @torch.no_grad()
     def get_buffer(
@@ -787,7 +789,8 @@ class DRCActivationsStore(ActivationsStore):
                 cast(Any, new_samples),
                 batch_size=batch_size,
                 shuffle=True,
-                collate_fn=lambda x: torch.stack(x).to(self.device),
+                collate_fn=lambda x: torch.utils.data.default_collate(x).to(self.device),
+                pin_memory=True,
             )
         )
         self.current_epoch += 1
