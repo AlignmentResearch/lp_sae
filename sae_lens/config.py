@@ -220,7 +220,7 @@ class LanguageModelSAERunnerConfig:
 
     # Misc
     resume: bool = False
-    n_checkpoints: int = 0
+    n_checkpoints: int = 5
     checkpoint_path: str = "checkpoints"
     verbose: bool = True
     model_kwargs: dict[str, Any] = field(default_factory=dict)
@@ -295,7 +295,7 @@ class LanguageModelSAERunnerConfig:
             unique_id = cast(
                 Any, wandb
             ).util.generate_id()  # not sure why this type is erroring
-        self.checkpoint_path = f"{self.checkpoint_path}/{unique_id}"
+        # self.checkpoint_path = f"{self.checkpoint_path}/{unique_id}"
 
         if self.verbose:
             print(
