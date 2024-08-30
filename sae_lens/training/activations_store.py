@@ -575,9 +575,9 @@ class ActivationsStore:
         """
         save_file({"activations": buffer}, path)
 
-    def load_buffer(self, path: str) -> torch.Tensor:
+    def load_buffer(self, path: str, device=None) -> torch.Tensor:
 
-        with safe_open(path, framework="pt", device=str(self.device)) as f:  # type: ignore
+        with safe_open(path, framework="pt", device=device or str(self.device)) as f:  # type: ignore
             buffer = f.get_tensor("activations")
         return buffer
 
@@ -753,7 +753,7 @@ class DRCActivationsStore(ActivationsStore):
         self.acts_ds = ActivationsDataset(self.cached_activations_path, keys=[self.hook_name], num_data_points=self.total_training_tokens, load_data=False)
         if os.path.exists(cache_file):
             print(f"Loading from cache file {cache_file}")
-            self.activations = self.load_buffer(cache_file)
+            self.activations = self.load_buffer(cache_file, "cpu")
         else:
             self.activations = self.acts_ds.load_only_activations(grid_wise=self.grid_wise)[self.hook_name]
             self.activations = torch.tensor(self.activations[:, None], dtype=self.dtype)
@@ -790,7 +790,6 @@ class DRCActivationsStore(ActivationsStore):
                 batch_size=batch_size,
                 shuffle=True,
                 collate_fn=lambda x: torch.utils.data.default_collate(x).to(self.device),
-                pin_memory=True,
             )
         )
         self.current_epoch += 1
