@@ -12,9 +12,9 @@ from transformer_lens.hook_points import HookedRootModule
 
 from sae_lens.sae import SAE
 from sae_lens.toolkit.pretrained_saes_directory import get_pretrained_saes_directory
-from sae_lens.training.activations_store import ActivationsStore
+from sae_lens.training.activations_store import ActivationsStore, DRCActivationsStore
 from sae_lens.evals import EvalConfig, get_eval_everything_config
-from learned_planners.interp.utils import play_level, run_fn_with_cache
+from learned_planners.interp.utils import play_level, run_fn_with_cache, load_policy
 from cleanba.environments import BoxobanConfig, EnvpoolBoxobanConfig
 import os
 import pathlib
@@ -378,6 +378,13 @@ def get_recons_loss(
 
         original_device = activations.device
         activations = activations.to(sae.device)
+        if activation_store.grid_wise:
+            original_shape = activations.shape
+            d_in_idx = activations.shape.index(sae.cfg.d_in)
+            # take d_in_idx as the last dimension
+            activations = activations.permute(*([i for i in range(activations.ndim) if i != d_in_idx] + [d_in_idx]))
+        else:
+            raise NotImplementedError("Only grid_wise activations are supported for now")
 
         # Handle rescaling if SAE expects it
         if activation_store.normalize_activations == "expected_average_only_in":
@@ -390,49 +397,12 @@ def get_recons_loss(
         if activation_store.normalize_activations == "expected_average_only_in":
             activations = activation_store.unscale(activations)
 
-        return activations.to(original_device)
-
-    def all_head_replacement_hook(activations: torch.Tensor, hook: Any):
-
-        original_device = activations.device
-        activations = activations.to(sae.device)
-
-        # Handle rescaling if SAE expects it
-        if activation_store.normalize_activations == "expected_average_only_in":
-            activations = activation_store.apply_norm_scaling_factor(activations)
-
-        # SAE class agnost forward forward pass.
-        new_activations = sae.decode(sae.encode(activations.flatten(-2, -1))).to(
-            activations.dtype
-        )
-
-        new_activations = new_activations.reshape(
-            activations.shape
-        )  # reshape to match original shape
-
-        # Unscale if activations were scaled prior to going into the SAE
-        if activation_store.normalize_activations == "expected_average_only_in":
-            new_activations = activation_store.unscale(new_activations)
-
-        return new_activations.to(original_device)
-
-    def single_head_replacement_hook(activations: torch.Tensor, hook: Any):
-
-        original_device = activations.device
-        activations = activations.to(sae.device)
-
-        # Handle rescaling if SAE expects it
-        if activation_store.normalize_activations == "expected_average_only_in":
-            activations = activation_store.apply_norm_scaling_factor(activations)
-
-        new_activations = sae.decode(sae.encode(activations[:, :, head_index])).to(
-            activations.dtype
-        )
-        activations[:, :, head_index] = new_activations
-
-        # Unscale if activations were scaled prior to going into the SAE
-        if activation_store.normalize_activations == "expected_average_only_in":
-            activations = activation_store.unscale(activations)
+        # reverse the permutation
+        if activation_store.grid_wise:
+            new_permutation = list(range(activations.ndim - 1))
+            new_permutation.insert(d_in_idx, activations.ndim - 1)
+            activations = activations.permute(*new_permutation)
+            assert activations.shape == original_shape, f"Expected {original_shape}, got {activations.shape}"
         return activations.to(original_device)
 
     def standard_zero_ablate_hook(activations: torch.Tensor, hook: Any):
@@ -510,28 +480,33 @@ def get_recons_loss(
     return metrics
 
 
-def all_loadable_saes() -> list[tuple[str, str, float, float]]:
+# def all_loadable_saes() -> list[tuple[str, str, float, float]]:
+#     all_loadable_saes = []
+#     saes_directory = get_pretrained_saes_directory()
+#     for release, lookup in tqdm(saes_directory.items()):
+#         for sae_name in lookup.saes_map.keys():
+#             expected_var_explained = lookup.expected_var_explained[sae_name]
+#             expected_l0 = lookup.expected_l0[sae_name]
+#             all_loadable_saes.append(
+#                 (release, sae_name, expected_var_explained, expected_l0)
+#             )
+
+#     return all_loadable_saes
+
+import glob
+
+def all_loadable_saes() -> list[str]:
+    base_path = "/training/TrainSAEConfig/01-train-sae-on-hard-set/wandb/" # run-20240830_024028-x2jh4zdf/local-files/checkpoint/final_30007296
+    run_dirs = glob.glob(base_path + "run-*")
     all_loadable_saes = []
-    saes_directory = get_pretrained_saes_directory()
-    for release, lookup in tqdm(saes_directory.items()):
-        for sae_name in lookup.saes_map.keys():
-            expected_var_explained = lookup.expected_var_explained[sae_name]
-            expected_l0 = lookup.expected_l0[sae_name]
-            all_loadable_saes.append(
-                (release, sae_name, expected_var_explained, expected_l0)
-            )
-
-    return all_loadable_saes
+    for run_dir in run_dirs:
+        checkpoint_path = run_dir + "/local-files/checkpoint/*"
+        checkpoints = glob.glob(checkpoint_path)
+        for checkpoint in checkpoints:
+            all_loadable_saes.append(checkpoint)
 
 
-def multiple_evals(
-    sae_regex_pattern: str,
-    sae_block_pattern: str,
-    num_eval_batches: int = 10,
-    eval_batch_size_prompts: int = 8,
-    datasets: list[str] = ["Skylion007/openwebtext", "lighteval/MATH"],
-    ctx_lens: list[int] = [64, 128, 256, 512],
-) -> pd.DataFrame:
+def multiple_evals() -> pd.DataFrame:
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -554,46 +529,22 @@ def multiple_evals(
         n_eval_sparsity_variance_batches=num_eval_batches,
     )
 
-    current_model = None
-    current_model_str = None
+    current_model = load_policy()
     print(filtered_saes)
-    for sae_name, sae_block, _, _ in tqdm(filtered_saes):
+    for path in tqdm(filtered_saes):
 
-        sae = SAE.from_pretrained(
-            release=sae_name,  # see other options in sae_lens/pretrained_saes.yaml
-            sae_id=sae_block,  # won't always be a hook point
-            device=device,
-        )[0]
+        sae = SAE.load_from_pretrained(path, device=device)
 
-        if current_model_str != sae.cfg.model_name:
-            del current_model  # potentially saves GPU memory
-            current_model_str = sae.cfg.model_name
-            current_model = HookedTransformer.from_pretrained(
-                current_model_str, device=device
-            )
-        assert current_model is not None
+        activation_store = DRCActivationsStore.from_config(current_model, sae.cfg)
 
-        for ctx_len in ctx_lens:
-            for dataset in datasets:
-
-                activation_store = ActivationsStore.from_sae(
-                    current_model, sae, context_size=ctx_len, dataset=dataset
-                )
-                activation_store.shuffle_input_dataset(seed=42)
-
-                eval_metrics = {}
-                eval_metrics["sae_id"] = f"{sae_name}-{sae_block}"
-                eval_metrics["context_size"] = ctx_len
-                eval_metrics["dataset"] = dataset
-
-                eval_metrics |= run_evals(
-                    sae=sae,
-                    activation_store=activation_store,
-                    model=current_model,
-                    eval_config=eval_config,
-                )
-
-                eval_results.append(eval_metrics)
+        eval_metrics = run_evals(
+            sae=sae,
+            activation_store=activation_store,
+            model=current_model,
+            eval_config=eval_config,
+        )
+        eval_metrics["sae_path"] = path
+        eval_results.append(eval_metrics)
 
     return pd.DataFrame(eval_results)
 
