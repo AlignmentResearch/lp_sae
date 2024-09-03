@@ -763,7 +763,7 @@ class DRCActivationsStore(ActivationsStore):
             self.total_est_buffers = self.acts_ds.total_est_buffers()
             self.buffer_idx = 0
             all_cache_names = "-".join([n.split("/")[-1] for n in self.cached_activations_path])
-            cache_file_name = f"idx{self.buffer_idx}-{self.hook_name}-{'gridwise' if self.grid_wise else ''}.safetensors"
+            cache_file_name = f"idx{self.buffer_idx}-{self.hook_name}-{all_cache_names}-{'gridwise' if self.grid_wise else ''}.safetensors"
             base_cache_path = f"{self.cached_activations_path[0].rsplit('/', 1)[0]}/buffers/"
             os.makedirs(base_cache_path, exist_ok=True)
             self.cache_file = base_cache_path + cache_file_name
