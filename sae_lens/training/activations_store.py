@@ -682,13 +682,17 @@ class DRCActivationsStore(ActivationsStore):
         normalize_activations: str,
         device: torch.device,
         dtype: str,
-        cached_activations_path: str | None = None,
+        cached_activations_path: str | list[str] | None = None,
         model_kwargs: dict[str, Any] | None = None,
         autocast_lm: bool = False,
         dataset_trust_remote_code: bool | None = None,
     ):
         self.grid_wise = grid_wise
         self.current_epoch = -1
+
+        assert cached_activations_path is not None
+        if isinstance(cached_activations_path, str):
+            cached_activations_path = [cached_activations_path]
 
         super().__init__(
             model=model,
@@ -712,9 +716,6 @@ class DRCActivationsStore(ActivationsStore):
             autocast_lm=autocast_lm,
             dataset_trust_remote_code=dataset_trust_remote_code,
         )
-
-        assert cached_activations_path is not None
-        self.load_cached_activations()
 
     @classmethod
     def from_config(
@@ -747,30 +748,43 @@ class DRCActivationsStore(ActivationsStore):
             dataset_trust_remote_code=cfg.dataset_trust_remote_code,
         )
 
-    def load_cached_activations(self) -> torch.Tensor:
-        cache_file = f"{self.hook_name}-{self.total_training_tokens//1e6}M-{'gridwise' if self.grid_wise else ''}.safetensors"
-        cache_file = f"{self.cached_activations_path}/{cache_file}"
-        self.acts_ds = ActivationsDataset(self.cached_activations_path, keys=[self.hook_name], num_data_points=self.total_training_tokens, load_data=False)
-        if os.path.exists(cache_file):
-            print(f"Loading from cache file {cache_file}")
-            self.activations = self.load_buffer(cache_file, "cpu")
-        else:
-            self.activations = self.acts_ds.load_only_activations(grid_wise=self.grid_wise)[self.hook_name]
-            self.activations = torch.tensor(self.activations[:, None], dtype=self.dtype)
-            self.save_buffer(self.activations, cache_file)
-        if self.activations.shape[0] != self.total_training_tokens:
-            Warning(f"Loaded activations have {self.activations.shape[0]} tokens, but expected {self.total_training_tokens}.")
-        assert self.activations.shape[1:] == (1, self.d_in)
-
     @torch.no_grad()
     def get_buffer(
         self, n_batches_in_buffer: int, raise_on_epoch_end: bool = False
     ) -> torch.Tensor:
-        try:
-            return self.activations
-        except AttributeError:
-            raise ValueError("Cached activations must be loaded before calling get_buffer.")
-    
+        if "acts_ds" not in self.__dict__:
+            self.acts_ds = ActivationsDataset(
+                self.cached_activations_path,
+                keys=[self.hook_name],
+                num_data_points=None,
+                load_data=False,
+                only_env_steps=False,
+            )
+            self.total_est_buffers = self.acts_ds.total_est_buffers()
+            self.buffer_idx = 0
+            all_cache_names = "-".join([n.split("/")[-1] for n in self.cached_activations_path])
+            cache_file_name = f"idx{self.buffer_idx}-{self.hook_name}-{'gridwise' if self.grid_wise else ''}.safetensors"
+            base_cache_path = f"{self.cached_activations_path[0].rsplit('/', 1)[0]}/buffers/"
+            os.makedirs(base_cache_path, exist_ok=True)
+            self.cache_file = base_cache_path + cache_file_name
+        else:
+            self.buffer_idx += 1
+            if self.buffer_idx >= self.total_est_buffers:
+                raise StopIteration("All buffers have been exhausted.")
+            self.cache_file = self.cache_file.replace(f"idx{self.buffer_idx-1}", f"idx{self.buffer_idx}")
+
+        if os.path.exists(self.cache_file):
+            print(f"Loading from cache file {self.cache_file}")
+            activations = self.load_buffer(self.cache_file, "cpu")
+        else:
+            activations = self.acts_ds.load_only_activations(buffer_idx=self.buffer_idx, grid_wise=self.grid_wise)[self.hook_name]
+            activations = torch.tensor(activations[:, None], dtype=self.dtype)
+            self.save_buffer(activations, self.cache_file)
+        if activations.shape[0] != self.total_training_tokens:
+            Warning(f"Loaded activations have {activations.shape[0]} tokens, but expected {self.total_training_tokens}.")
+        assert activations.shape[1:] == (1, self.d_in)
+        return activations
+
     def get_data_loader(
         self,
     ) -> Iterator[Any]:
@@ -781,8 +795,25 @@ class DRCActivationsStore(ActivationsStore):
         (better mixing if you refill and shuffle regularly).
 
         """
+
         batch_size = self.train_batch_size_tokens
-        new_samples = self.get_buffer(self.half_buffer_size, raise_on_epoch_end=True)
+
+        try:
+            new_samples = self.get_buffer(
+                self.half_buffer_size, raise_on_epoch_end=True
+            )
+        except StopIteration:
+            print(
+                "Warning: All samples in the training dataset have been exhausted, we are now beginning a new epoch with the same samples."
+            )
+            del self.acts_ds
+            try:
+                new_samples = self.get_buffer(self.half_buffer_size)
+            except StopIteration:
+                raise ValueError(
+                    "We were unable to fill up the buffer directly after starting a new epoch. This could indicate that there are less samples in the dataset than are required to fill up the buffer. Consider reducing batch_size or n_batches_in_buffer. "
+                )
+
         dataloader = iter(
             DataLoader(
                 # TODO: seems like a typing bug?
@@ -792,9 +823,33 @@ class DRCActivationsStore(ActivationsStore):
                 collate_fn=lambda x: torch.utils.data.default_collate(x).to(self.device),
             )
         )
-        self.current_epoch += 1
-        wandb.log({"epoch": self.current_epoch})
+
         return dataloader
+
+    # def get_data_loader(
+    #     self,
+    # ) -> Iterator[Any]:
+    #     """
+    #     Return a torch.utils.dataloader which you can get batches from.
+
+    #     Should automatically refill the buffer when it gets to n % full.
+    #     (better mixing if you refill and shuffle regularly).
+
+    #     """
+    #     batch_size = self.train_batch_size_tokens
+    #     new_samples = self.get_buffer(self.half_buffer_size, raise_on_epoch_end=True)
+    #     dataloader = iter(
+    #         DataLoader(
+    #             # TODO: seems like a typing bug?
+                # cast(Any, new_samples),
+    #             batch_size=batch_size,
+    #             shuffle=True,
+    #             collate_fn=lambda x: torch.utils.data.default_collate(x).to(self.device),
+    #         )
+    #     )
+    #     self.current_epoch += 1
+    #     wandb.log({"epoch": self.current_epoch})
+    #     return dataloader
 
 
 def validate_pretokenized_dataset_tokenizer(
