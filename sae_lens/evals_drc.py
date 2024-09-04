@@ -259,6 +259,38 @@ def run_evals(
 #     return metrics
 
 
+# TODO(tomMcGrath): the rescaling below is a bit of a hack and could probably be tidied up
+def sae_replacement_hook(activations: torch.Tensor, hook: Any, sae, activation_store):
+    original_device = activations.device
+    activations = activations.to(sae.device)
+    if activation_store.grid_wise:
+        original_shape = activations.shape
+        d_in_idx = activations.shape.index(sae.cfg.d_in)
+        # take d_in_idx as the last dimension
+        activations = activations.permute(*([i for i in range(activations.ndim) if i != d_in_idx] + [d_in_idx]))
+    else:
+        raise NotImplementedError("Only grid_wise activations are supported for now")
+
+    # Handle rescaling if SAE expects it
+    if activation_store.normalize_activations == "expected_average_only_in":
+        activations = activation_store.apply_norm_scaling_factor(activations)
+
+    # SAE class agnost forward forward pass.
+    activations = sae.decode(sae.encode(activations)).to(activations.dtype)
+
+    # Unscale if activations were scaled prior to going into the SAE
+    if activation_store.normalize_activations == "expected_average_only_in":
+        activations = activation_store.unscale(activations)
+
+    # reverse the permutation
+    if activation_store.grid_wise:
+        new_permutation = list(range(activations.ndim - 1))
+        new_permutation.insert(d_in_idx, activations.ndim - 1)
+        activations = activations.permute(*new_permutation)
+        assert activations.shape == original_shape, f"Expected {original_shape}, got {activations.shape}"
+    return activations.to(original_device)
+
+
 @torch.no_grad()
 def get_recons_loss(
     sae: SAE,
@@ -373,37 +405,7 @@ def get_recons_loss(
     for metric_name, metric_values in metric_dict.items():
         metrics[f"metrics/{metric_name}"] = torch.stack(metric_values).mean().item()
 
-    # TODO(tomMcGrath): the rescaling below is a bit of a hack and could probably be tidied up
-    def standard_replacement_hook(activations: torch.Tensor, hook: Any):
-
-        original_device = activations.device
-        activations = activations.to(sae.device)
-        if activation_store.grid_wise:
-            original_shape = activations.shape
-            d_in_idx = activations.shape.index(sae.cfg.d_in)
-            # take d_in_idx as the last dimension
-            activations = activations.permute(*([i for i in range(activations.ndim) if i != d_in_idx] + [d_in_idx]))
-        else:
-            raise NotImplementedError("Only grid_wise activations are supported for now")
-
-        # Handle rescaling if SAE expects it
-        if activation_store.normalize_activations == "expected_average_only_in":
-            activations = activation_store.apply_norm_scaling_factor(activations)
-
-        # SAE class agnost forward forward pass.
-        activations = sae.decode(sae.encode(activations)).to(activations.dtype)
-
-        # Unscale if activations were scaled prior to going into the SAE
-        if activation_store.normalize_activations == "expected_average_only_in":
-            activations = activation_store.unscale(activations)
-
-        # reverse the permutation
-        if activation_store.grid_wise:
-            new_permutation = list(range(activations.ndim - 1))
-            new_permutation.insert(d_in_idx, activations.ndim - 1)
-            activations = activations.permute(*new_permutation)
-            assert activations.shape == original_shape, f"Expected {original_shape}, got {activations.shape}"
-        return activations.to(original_device)
+    standard_replacement_hook = partial(sae_replacement_hook, sae=sae, activation_store=activation_store)
 
     def standard_zero_ablate_hook(activations: torch.Tensor, hook: Any):
         original_device = activations.device
