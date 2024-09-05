@@ -7,17 +7,18 @@ import einops
 import pandas as pd
 import torch
 from tqdm import tqdm
-from transformer_lens import HookedTransformer
 from transformer_lens.hook_points import HookedRootModule
 
 from sae_lens.sae import SAE
-from sae_lens.toolkit.pretrained_saes_directory import get_pretrained_saes_directory
 from sae_lens.training.activations_store import ActivationsStore, DRCActivationsStore
 from sae_lens.evals import EvalConfig, get_eval_everything_config
-from learned_planners.interp.utils import play_level, run_fn_with_cache, load_policy
+from learned_planners.interp.utils import play_level, run_fn_with_cache, load_policy, save_video as save_video_lp
 from cleanba.environments import BoxobanConfig, EnvpoolBoxobanConfig
 import os
 import pathlib
+import wandb
+import concurrent.futures
+
 
 @torch.no_grad()
 def run_evals(
@@ -291,6 +292,36 @@ def sae_replacement_hook(activations: torch.Tensor, hook: Any, sae, activation_s
     return activations.to(original_device)
 
 
+def save_video(sae_feature_activations, original_obs, sae_cfg, num_envs, lengths, num_features_to_show=45):
+    act_freq = (sae_feature_activations > 0).sum(dim=0)
+    assert act_freq.shape == (sae_cfg.d_sae,)
+    assert sae_feature_activations.shape == (len(original_obs) * num_envs * 10 * 10, sae_cfg.d_sae)
+    sae_feature_reshaped = sae_feature_activations.reshape(len(original_obs), num_envs, 10, 10, -1)
+    sae_acts = sae_feature_reshaped[:lengths[0], 0].permute(3, 0, 1, 2)
+    top_activating_features = torch.argsort(act_freq, descending=True)
+    topkfeatures = 15
+    step = wandb.run.step
+    videos_dict = {}
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=min(4, num_features_to_show // topkfeatures)) as executor:
+        futures = [
+            executor.submit(
+                save_video_lp,
+                f"top_activating_features_step-{step}_start-{feature_start_idx}.mp4",
+                original_obs[:lengths[0], 0],
+                sae_acts[top_activating_features[feature_start_idx : feature_start_idx + topkfeatures]],
+                overlapped=False,
+                base_dir=wandb.run.dir + "/local-files/videos",
+            )
+            for feature_start_idx in range(0, num_features_to_show, topkfeatures)
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            video_path = future.result()
+            feature_start_idx = re.search(r"start-(\d+)", video_path).group(1)
+            videos_dict[f"videos/top_activating_features_start_{feature_start_idx}"] = wandb.Video(video_path, format="mp4")
+    return videos_dict
+
+
 @torch.no_grad()
 def get_recons_loss(
     sae: SAE,
@@ -331,14 +362,14 @@ def get_recons_loss(
     boxo_env = boxo_cfg.make()
 
     hook_name_last_int_pos = hook_name + ".0.2"
-    original_obs, _, original_logits, _, _, _, cache, _ = play_level(
+    out = play_level(
         boxo_env,
         model,
         max_steps=100,
         fwd_hooks=None,
         names_filter=[hook_name_last_int_pos],
     )
-    metric_dict = {}
+    original_obs, original_logits, cache, lengths = out.obs, out.logits, out.cache, out.lengths
     # we would include hook z, except that we now have base SAE's
     # which will do their own reshaping for hook z.
     has_head_dim_key_substrings = ["hook_q", "hook_k", "hook_v", "hook_z"]
@@ -356,6 +387,9 @@ def get_recons_loss(
 
     # send the (maybe normalised) activations into the SAE
     sae_feature_activations = sae.encode(original_act.to(sae.device))
+
+    video_dict = save_video(sae_feature_activations, original_obs, sae.cfg, num_envs, lengths)
+
     sae_out = sae.decode(sae_feature_activations).to(original_act.device)
     del cache
 
@@ -401,7 +435,7 @@ def get_recons_loss(
         metric_dict["explained_variance"].append(explained_variance)
         metric_dict["mse"].append(resid_sum_of_squares)
 
-    metrics: dict[str, float] = {}
+    metrics: dict[str, float] = {**video_dict}
     for metric_name, metric_values in metric_dict.items():
         metrics[f"metrics/{metric_name}"] = torch.stack(metric_values).mean().item()
 
