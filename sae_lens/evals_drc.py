@@ -18,7 +18,7 @@ import os
 import pathlib
 import wandb
 import concurrent.futures
-
+import multiprocessing
 
 @torch.no_grad()
 def run_evals(
@@ -303,6 +303,7 @@ def save_video(sae_feature_activations, original_obs, sae_cfg, num_envs, lengths
     step = wandb.run.step
     videos_dict = {}
 
+    multiprocessing.set_start_method("spawn", force=True)
     with concurrent.futures.ProcessPoolExecutor(max_workers=min(4, num_features_to_show // topkfeatures)) as executor:
         futures = [
             executor.submit(
