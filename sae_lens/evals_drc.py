@@ -388,7 +388,7 @@ def get_recons_loss(
     # send the (maybe normalised) activations into the SAE
     sae_feature_activations = sae.encode(original_act.to(sae.device))
 
-    video_dict = save_video(sae_feature_activations, original_obs, sae.cfg, num_envs, lengths)
+    video_dict = save_video(sae_feature_activations.cpu(), original_obs.cpu(), sae.cfg, num_envs, lengths)
 
     sae_out = sae.decode(sae_feature_activations).to(original_act.device)
     del cache
