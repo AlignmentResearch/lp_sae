@@ -313,6 +313,7 @@ def save_video(sae_feature_activations, original_obs, sae_cfg, num_envs, lengths
                 sae_acts[top_activating_features[feature_start_idx : feature_start_idx + topkfeatures]],
                 overlapped=False,
                 base_dir=wandb.run.dir + "/local-files/videos",
+                sae_feature_offset=feature_start_idx,
             )
             for feature_start_idx in range(0, num_features_to_show, topkfeatures)
         ]
