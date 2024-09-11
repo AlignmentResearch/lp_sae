@@ -12,7 +12,7 @@ from transformer_lens.hook_points import HookedRootModule
 from sae_lens.sae import SAE
 from sae_lens.training.activations_store import ActivationsStore, DRCActivationsStore
 from sae_lens.evals import EvalConfig, get_eval_everything_config
-from learned_planners.interp.utils import play_level, run_fn_with_cache, load_policy, save_video as save_video_lp
+from learned_planners.interp.utils import play_level, run_fn_with_cache, load_policy, save_video_sae as save_video_lp
 from cleanba.environments import BoxobanConfig, EnvpoolBoxobanConfig
 import os
 import pathlib
@@ -311,7 +311,6 @@ def save_video(sae_feature_activations, original_obs, sae_cfg, num_envs, lengths
                 f"top_activating_features_step-{step}_start-{feature_start_idx}.mp4",
                 original_obs[:lengths[0], 0],
                 sae_acts[top_activating_features[feature_start_idx : feature_start_idx + topkfeatures]],
-                overlapped=False,
                 base_dir=wandb.run.dir + "/local-files/videos",
                 sae_feature_offset=feature_start_idx,
             )
