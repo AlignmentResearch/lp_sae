@@ -9,8 +9,9 @@ from tqdm import tqdm
 from transformer_lens.hook_points import HookedRootModule
 
 from sae_lens import __version__
-from sae_lens.config import LanguageModelSAERunnerConfig
-from sae_lens.evals import EvalConfig, run_evals
+from sae_lens.config import LanguageModelSAERunnerConfig, DRCSAERunnerConfig
+from sae_lens.evals import EvalConfig, run_evals as run_evals_orig
+from sae_lens.evals_drc import run_evals as run_evals_drc
 from sae_lens.training.activations_store import ActivationsStore
 from sae_lens.training.optim import L1Scheduler, get_lr_scheduler
 from sae_lens.training.training_sae import TrainingSAE, TrainStepOutput
@@ -62,6 +63,7 @@ class SAETrainer:
         self.activation_store = activation_store
         self.save_checkpoint = save_checkpoint_fn
         self.cfg = cfg
+        self.is_drc = isinstance(cfg, DRCSAERunnerConfig)
 
         self.n_training_steps: int = 0
         self.n_training_tokens: int = 0
@@ -137,8 +139,11 @@ class SAETrainer:
             batch_size_prompts=self.cfg.eval_batch_size_prompts,
             n_eval_reconstruction_batches=self.cfg.n_eval_batches,
             compute_ce_loss=True,
+            compute_kl=True,
             n_eval_sparsity_variance_batches=1,
             compute_l2_norms=True,
+            compute_sparsity_metrics=True,
+            compute_variance_metrics=True,
         )
 
     @property
@@ -325,12 +330,20 @@ class SAETrainer:
             self.cfg.wandb_log_frequency * self.cfg.eval_every_n_wandb_logs
         ) == 0:
             self.sae.eval()
+            kwargs = {}
+            if self.is_drc:
+                run_evals = run_evals_drc
+                kwargs["num_envs"] = self.cfg.num_envs
+                kwargs["envpool"] = self.cfg.envpool
+            else:
+                run_evals = run_evals_orig
             eval_metrics = run_evals(
                 sae=self.sae,
                 activation_store=self.activation_store,
                 model=self.model,
                 eval_config=self.trainer_eval_config,
                 model_kwargs=self.cfg.model_kwargs,
+                **kwargs,
             )
 
             # Remove eval metrics that are already logged during training
