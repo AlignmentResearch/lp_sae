@@ -53,7 +53,6 @@ class SAETrainingRunner:
 
         self.cfg = cfg
         is_drc = isinstance(cfg, DRCSAERunnerConfig)
-        print(f"Is DRC: {is_drc}")
 
         if not is_drc and override_model is None:
             self.model = load_model(
@@ -73,6 +72,7 @@ class SAETrainingRunner:
             override_dataset=override_dataset,
         )
         if is_drc:
+            # we can train for multiple epochs on the same data for DRC
             self.cfg.training_tokens *= self.cfg.epochs
 
         if self.cfg.from_pretrained_path is not None:

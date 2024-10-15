@@ -1,4 +1,5 @@
 import argparse
+import glob
 import re
 from functools import partial
 from typing import Any, Mapping
@@ -56,38 +57,6 @@ def run_evals(
         num_envs=num_envs,
         envpool=envpool,
     )
-
-    #     assert eval_config.n_eval_reconstruction_batches > 0
-    #     metrics |= get_downstream_reconstruction_metrics(
-    #         sae,
-    #         model,
-    #         activation_store,
-    #         compute_kl=eval_config.compute_kl,
-    #         compute_ce_loss=eval_config.compute_ce_loss,
-    #         n_batches=eval_config.n_eval_reconstruction_batches,
-    #         eval_batch_size_prompts=actual_batch_size,
-    #     )
-
-    #     activation_store.reset_input_dataset()
-
-    # if (
-    #     eval_config.compute_l2_norms
-    #     or eval_config.compute_sparsity_metrics
-    #     or eval_config.compute_variance_metrics
-    # ):
-    #     assert eval_config.n_eval_sparsity_variance_batches > 0
-    #     metrics |= get_sparsity_and_variance_metrics(
-    #         sae,
-    #         model,
-    #         activation_store,
-    #         compute_l2_norms=eval_config.compute_l2_norms,
-    #         compute_sparsity_metrics=eval_config.compute_sparsity_metrics,
-    #         compute_variance_metrics=eval_config.compute_variance_metrics,
-    #         n_batches=eval_config.n_eval_sparsity_variance_batches,
-    #         eval_batch_size_prompts=actual_batch_size,
-    #         model_kwargs=model_kwargs,
-    #     )
-
     if len(metrics) == 0:
         raise ValueError(
             "No metrics were computed, please set at least one metric to True."
@@ -100,166 +69,7 @@ def run_evals(
         elif not previous_hook_z_reshaping_mode and sae.hook_z_reshaping_mode:
             sae.turn_off_forward_pass_hook_z_reshaping()
 
-    # total_tokens_evaluated = (
-    #     activation_store.context_size
-    #     * eval_config.n_eval_reconstruction_batches
-    #     * actual_batch_size
-    # )
-
     return metrics
-
-
-# def get_downstream_reconstruction_metrics(
-#     sae: SAE,
-#     model: HookedRootModule,
-#     activation_store: ActivationsStore,
-#     compute_kl: bool,
-#     compute_ce_loss: bool,
-#     n_batches: int,
-#     eval_batch_size_prompts: int,
-# ):
-#     metrics_dict = {}
-#     if compute_kl:
-#         metrics_dict["kl_div_with_sae"] = []
-#         metrics_dict["kl_div_with_ablation"] = []
-#     if compute_ce_loss:
-#         metrics_dict["ce_loss_with_sae"] = []
-#         metrics_dict["ce_loss_without_sae"] = []
-#         metrics_dict["ce_loss_with_ablation"] = []
-
-
-
-#     for _ in range(n_batches):
-#         batch_tokens = activation_store.get_batch_tokens(eval_batch_size_prompts)
-#         for metric_name, metric_value in get_recons_loss(
-#             sae,
-#             model,
-#             batch_tokens,
-#             activation_store,
-#             compute_kl=compute_kl,
-#             compute_ce_loss=compute_ce_loss,
-#         ).items():
-#             metrics_dict[metric_name].append(metric_value)
-
-#     metrics: dict[str, float] = {}
-#     for metric_name, metric_values in metrics_dict.items():
-#         metrics[f"metrics/{metric_name}"] = torch.stack(metric_values).mean().item()
-
-#     if compute_kl:
-#         metrics["metrics/kl_div_score"] = (
-#             metrics["metrics/kl_div_with_ablation"] - metrics["metrics/kl_div_with_sae"]
-#         ) / metrics["metrics/kl_div_with_ablation"]
-
-#     if compute_ce_loss:
-#         metrics["metrics/ce_loss_score"] = (
-#             metrics["metrics/ce_loss_with_ablation"]
-#             - metrics["metrics/ce_loss_with_sae"]
-#         ) / (
-#             metrics["metrics/ce_loss_with_ablation"]
-#             - metrics["metrics/ce_loss_without_sae"]
-#         )
-
-#     return metrics
-
-
-# def get_sparsity_and_variance_metrics(
-#     sae: SAE,
-#     model: HookedRootModule,
-#     activation_store: ActivationsStore,
-#     n_batches: int,
-#     compute_l2_norms: bool,
-#     compute_sparsity_metrics: bool,
-#     compute_variance_metrics: bool,
-#     eval_batch_size_prompts: int,
-#     model_kwargs: Mapping[str, Any],
-# ):
-
-#     hook_name = sae.cfg.hook_name
-#     hook_head_index = sae.cfg.hook_head_index
-
-#     metric_dict = {}
-#     if compute_l2_norms:
-#         metric_dict["l2_norm_in"] = []
-#         metric_dict["l2_norm_out"] = []
-#         metric_dict["l2_ratio"] = []
-#     if compute_sparsity_metrics:
-#         metric_dict["l0"] = []
-#         metric_dict["l1"] = []
-#     if compute_variance_metrics:
-#         metric_dict["explained_variance"] = []
-#         metric_dict["mse"] = []
-
-#     for _ in range(n_batches):
-#         batch_tokens = activation_store.get_batch_tokens(eval_batch_size_prompts)
-
-#         # get cache
-#         _, cache = model.run_with_cache(
-#             batch_tokens,
-#             prepend_bos=False,
-#             names_filter=[hook_name],
-#             **model_kwargs,
-#         )
-
-#         # we would include hook z, except that we now have base SAE's
-#         # which will do their own reshaping for hook z.
-#         has_head_dim_key_substrings = ["hook_q", "hook_k", "hook_v", "hook_z"]
-#         if hook_head_index is not None:
-#             original_act = cache[hook_name][:, :, hook_head_index]
-#         elif any(substring in hook_name for substring in has_head_dim_key_substrings):
-#             original_act = cache[hook_name].flatten(-2, -1)
-#         else:
-#             original_act = cache[hook_name]
-
-#         # normalise if necessary (necessary in training only, otherwise we should fold the scaling in)
-#         if activation_store.normalize_activations == "expected_average_only_in":
-#             original_act = activation_store.apply_norm_scaling_factor(original_act)
-
-#         # send the (maybe normalised) activations into the SAE
-#         sae_feature_activations = sae.encode(original_act.to(sae.device))
-#         sae_out = sae.decode(sae_feature_activations).to(original_act.device)
-#         del cache
-
-#         if activation_store.normalize_activations == "expected_average_only_in":
-#             sae_out = activation_store.unscale(sae_out)
-
-#         flattened_sae_input = einops.rearrange(original_act, "b ctx d -> (b ctx) d")
-#         flattened_sae_feature_acts = einops.rearrange(
-#             sae_feature_activations, "b ctx d -> (b ctx) d"
-#         )
-#         flattened_sae_out = einops.rearrange(sae_out, "b ctx d -> (b ctx) d")
-
-#         if compute_l2_norms:
-#             l2_norm_in = torch.norm(flattened_sae_input, dim=-1)
-#             l2_norm_out = torch.norm(flattened_sae_out, dim=-1)
-#             l2_norm_in_for_div = l2_norm_in.clone()
-#             l2_norm_in_for_div[torch.abs(l2_norm_in_for_div) < 0.0001] = 1
-#             l2_norm_ratio = l2_norm_out / l2_norm_in_for_div
-#             metric_dict["l2_norm_in"].append(l2_norm_in)
-#             metric_dict["l2_norm_out"].append(l2_norm_out)
-#             metric_dict["l2_ratio"].append(l2_norm_ratio)
-
-#         if compute_sparsity_metrics:
-#             l0 = (flattened_sae_feature_acts > 0).sum(dim=-1).float()
-#             l1 = flattened_sae_feature_acts.sum(dim=-1)
-#             metric_dict["l0"].append(l0)
-#             metric_dict["l1"].append(l1)
-
-#         if compute_variance_metrics:
-#             resid_sum_of_squares = (
-#                 (flattened_sae_input - flattened_sae_out).pow(2).sum(dim=-1)
-#             )
-#             total_sum_of_squares = (
-#                 (flattened_sae_input - flattened_sae_input.mean(dim=0)).pow(2).sum(-1)
-#             )
-#             explained_variance = 1 - resid_sum_of_squares / total_sum_of_squares
-#             metric_dict["explained_variance"].append(explained_variance)
-#             metric_dict["mse"].append(resid_sum_of_squares)
-
-#     metrics: dict[str, float] = {}
-#     for metric_name, metric_values in metric_dict.items():
-#         metrics[f"metrics/{metric_name}"] = torch.stack(metric_values).mean().item()
-
-#     return metrics
 
 
 # TODO(tomMcGrath): the rescaling below is a bit of a hack and could probably be tidied up
@@ -519,21 +329,6 @@ def get_recons_loss(
     metrics["metrics/total_tokens_evaluated"] = boxo_cfg.num_envs * boxo_cfg.max_episode_steps
     return metrics
 
-
-# def all_loadable_saes() -> list[tuple[str, str, float, float]]:
-#     all_loadable_saes = []
-#     saes_directory = get_pretrained_saes_directory()
-#     for release, lookup in tqdm(saes_directory.items()):
-#         for sae_name in lookup.saes_map.keys():
-#             expected_var_explained = lookup.expected_var_explained[sae_name]
-#             expected_l0 = lookup.expected_l0[sae_name]
-#             all_loadable_saes.append(
-#                 (release, sae_name, expected_var_explained, expected_l0)
-#             )
-
-#     return all_loadable_saes
-
-import glob
 
 def all_loadable_saes() -> list[str]:
     base_path = "/training/TrainSAEConfig/01-train-sae-on-hard-set/wandb/" # run-20240830_024028-x2jh4zdf/local-files/checkpoint/final_30007296

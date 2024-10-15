@@ -752,7 +752,7 @@ class DRCActivationsStore(ActivationsStore):
     def get_buffer(
         self, n_batches_in_buffer: int, raise_on_epoch_end: bool = False
     ) -> torch.Tensor:
-        if "acts_ds" not in self.__dict__:
+        if not hasattr(self, "acts_ds"):
             self.acts_ds = ActivationsDataset(
                 self.cached_activations_path,
                 keys=[self.hook_name],
@@ -825,31 +825,6 @@ class DRCActivationsStore(ActivationsStore):
         )
 
         return dataloader
-
-    # def get_data_loader(
-    #     self,
-    # ) -> Iterator[Any]:
-    #     """
-    #     Return a torch.utils.dataloader which you can get batches from.
-
-    #     Should automatically refill the buffer when it gets to n % full.
-    #     (better mixing if you refill and shuffle regularly).
-
-    #     """
-    #     batch_size = self.train_batch_size_tokens
-    #     new_samples = self.get_buffer(self.half_buffer_size, raise_on_epoch_end=True)
-    #     dataloader = iter(
-    #         DataLoader(
-    #             # TODO: seems like a typing bug?
-                # cast(Any, new_samples),
-    #             batch_size=batch_size,
-    #             shuffle=True,
-    #             collate_fn=lambda x: torch.utils.data.default_collate(x).to(self.device),
-    #         )
-    #     )
-    #     self.current_epoch += 1
-    #     wandb.log({"epoch": self.current_epoch})
-    #     return dataloader
 
 
 def validate_pretokenized_dataset_tokenizer(
