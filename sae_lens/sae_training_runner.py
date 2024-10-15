@@ -9,10 +9,10 @@ import wandb
 from safetensors.torch import save_file
 from transformer_lens.hook_points import HookedRootModule
 
-from sae_lens.config import HfDataset, LanguageModelSAERunnerConfig
+from sae_lens.config import HfDataset, LanguageModelSAERunnerConfig, DRCSAERunnerConfig
 from sae_lens.load_model import load_model
 from sae_lens.sae import SAE_CFG_PATH, SAE_WEIGHTS_PATH, SPARSITY_PATH
-from sae_lens.training.activations_store import ActivationsStore
+from sae_lens.training.activations_store import ActivationsStore, DRCActivationsStore
 from sae_lens.training.geometric_median import compute_geometric_median
 from sae_lens.training.sae_trainer import SAETrainer
 from sae_lens.training.training_sae import TrainingSAE, TrainingSAEConfig
@@ -52,8 +52,9 @@ class SAETrainingRunner:
             )
 
         self.cfg = cfg
+        is_drc = isinstance(cfg, DRCSAERunnerConfig)
 
-        if override_model is None:
+        if not is_drc and override_model is None:
             self.model = load_model(
                 self.cfg.model_class_name,
                 self.cfg.model_name,
@@ -62,12 +63,17 @@ class SAETrainingRunner:
             )
         else:
             self.model = override_model
+            self.model.to(self.cfg.device)
 
-        self.activations_store = ActivationsStore.from_config(
+        activations_store_cls = DRCActivationsStore if is_drc else ActivationsStore
+        self.activations_store = activations_store_cls.from_config(
             self.model,
             self.cfg,
             override_dataset=override_dataset,
         )
+        if is_drc:
+            # we can train for multiple epochs on the same data for DRC
+            self.cfg.training_tokens *= self.cfg.epochs
 
         if self.cfg.from_pretrained_path is not None:
             self.sae = TrainingSAE.load_from_pretrained(

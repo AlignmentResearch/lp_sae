@@ -61,6 +61,7 @@ class SAEConfig:
     sae_lens_training_version: Optional[str]
     activation_fn_kwargs: dict[str, Any] = field(default_factory=dict)
     neuronpedia_id: Optional[str] = None
+    grid_wise: bool = False
 
     @classmethod
     def from_dict(cls, config_dict: dict[str, Any]) -> "SAEConfig":

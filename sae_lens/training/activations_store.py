@@ -23,10 +23,13 @@ from sae_lens.config import (
     CacheActivationsRunnerConfig,
     HfDataset,
     LanguageModelSAERunnerConfig,
+    DRCSAERunnerConfig,
 )
 from sae_lens.sae import SAE
 from sae_lens.tokenization_and_batching import concat_and_batch_sequences
 
+from learned_planners.interp.train_probes import ActivationsDataset, DatasetStore
+import wandb
 
 # TODO: Make an activation store config class to be consistent with the rest of the code.
 class ActivationsStore:
@@ -192,6 +195,8 @@ class ActivationsStore:
 
         self.estimated_norm_scaling_factor = 1.0
 
+        if self.dataset is None: # will be None when using DRCActivationsStore
+            return
         # Check if dataset is tokenized
         dataset_sample = next(iter(self.dataset))
 
@@ -570,9 +575,9 @@ class ActivationsStore:
         """
         save_file({"activations": buffer}, path)
 
-    def load_buffer(self, path: str) -> torch.Tensor:
+    def load_buffer(self, path: str, device=None) -> torch.Tensor:
 
-        with safe_open(path, framework="pt", device=str(self.device)) as f:  # type: ignore
+        with safe_open(path, framework="pt", device=device or str(self.device)) as f:  # type: ignore
             buffer = f.get_tensor("activations")
         return buffer
 
@@ -653,6 +658,173 @@ class ActivationsStore:
 
     def save(self, file_path: str):
         save_file(self.state_dict(), file_path)
+
+
+class DRCActivationsStore(ActivationsStore):
+    """Activations store for DRC models."""
+
+    def __init__(
+        self,
+        grid_wise: bool,
+        model: HookedRootModule,
+        dataset: HfDataset | str,
+        streaming: bool,
+        hook_name: str,
+        hook_layer: int,
+        hook_head_index: int | None,
+        context_size: int,
+        d_in: int,
+        n_batches_in_buffer: int,
+        total_training_tokens: int,
+        store_batch_size_prompts: int,
+        train_batch_size_tokens: int,
+        prepend_bos: bool,
+        normalize_activations: str,
+        device: torch.device,
+        dtype: str,
+        cached_activations_path: str | list[str] | None = None,
+        model_kwargs: dict[str, Any] | None = None,
+        autocast_lm: bool = False,
+        dataset_trust_remote_code: bool | None = None,
+    ):
+        self.grid_wise = grid_wise
+        self.current_epoch = -1
+
+        assert cached_activations_path is not None
+        if isinstance(cached_activations_path, str):
+            cached_activations_path = [cached_activations_path]
+
+        super().__init__(
+            model=model,
+            dataset=dataset,
+            streaming=streaming,
+            hook_name=hook_name,
+            hook_layer=hook_layer,
+            hook_head_index=hook_head_index,
+            context_size=1,
+            d_in=d_in,
+            n_batches_in_buffer=1,
+            total_training_tokens=total_training_tokens,
+            store_batch_size_prompts=1,
+            train_batch_size_tokens=train_batch_size_tokens,
+            prepend_bos=prepend_bos,
+            normalize_activations=normalize_activations,
+            device=device,
+            dtype=dtype,
+            cached_activations_path=cached_activations_path,
+            model_kwargs=model_kwargs,
+            autocast_lm=autocast_lm,
+            dataset_trust_remote_code=dataset_trust_remote_code,
+        )
+
+    @classmethod
+    def from_config(
+        cls,
+        model: HookedRootModule,
+        cfg: DRCSAERunnerConfig,
+        override_dataset: HfDataset | None = None,
+    ) -> "DRCActivationsStore":
+        return cls(
+            grid_wise=cfg.grid_wise,
+            model=model,
+            dataset=override_dataset or cfg.dataset_path,
+            streaming=cfg.streaming,
+            hook_name=cfg.hook_name,
+            hook_layer=cfg.hook_layer,
+            hook_head_index=cfg.hook_head_index,
+            context_size=cfg.context_size,
+            d_in=cfg.d_in,
+            n_batches_in_buffer=cfg.n_batches_in_buffer,
+            total_training_tokens=cfg.training_tokens,
+            store_batch_size_prompts=cfg.store_batch_size_prompts,
+            train_batch_size_tokens=cfg.train_batch_size_tokens,
+            prepend_bos=cfg.prepend_bos,
+            normalize_activations=cfg.normalize_activations,
+            device=torch.device(cfg.act_store_device),
+            dtype=cfg.dtype,
+            cached_activations_path=cfg.cached_activations_path,
+            model_kwargs=cfg.model_kwargs,
+            autocast_lm=cfg.autocast_lm,
+            dataset_trust_remote_code=cfg.dataset_trust_remote_code,
+        )
+
+    @torch.no_grad()
+    def get_buffer(
+        self, n_batches_in_buffer: int, raise_on_epoch_end: bool = False
+    ) -> torch.Tensor:
+        if not hasattr(self, "acts_ds"):
+            self.acts_ds = ActivationsDataset(
+                self.cached_activations_path,
+                keys=[self.hook_name],
+                num_data_points=None,
+                load_data=False,
+                only_env_steps=False,
+            )
+            self.total_est_buffers = self.acts_ds.total_est_buffers()
+            self.buffer_idx = 0
+            all_cache_names = "-".join([n.split("/")[-1] for n in self.cached_activations_path])
+            cache_file_name = f"idx{self.buffer_idx}-{self.hook_name}-{all_cache_names}-{'gridwise' if self.grid_wise else ''}.safetensors"
+            base_cache_path = f"{self.cached_activations_path[0].rsplit('/', 1)[0]}/buffers/"
+            os.makedirs(base_cache_path, exist_ok=True)
+            self.cache_file = base_cache_path + cache_file_name
+        else:
+            self.buffer_idx += 1
+            if self.buffer_idx >= self.total_est_buffers:
+                raise StopIteration("All buffers have been exhausted.")
+            self.cache_file = self.cache_file.replace(f"idx{self.buffer_idx-1}", f"idx{self.buffer_idx}")
+
+        if os.path.exists(self.cache_file):
+            print(f"Loading from cache file {self.cache_file}")
+            activations = self.load_buffer(self.cache_file, "cpu")
+        else:
+            activations = self.acts_ds.load_only_activations(buffer_idx=self.buffer_idx, grid_wise=self.grid_wise)[self.hook_name]
+            activations = torch.tensor(activations[:, None], dtype=self.dtype)
+            self.save_buffer(activations, self.cache_file)
+        if activations.shape[0] != self.total_training_tokens:
+            Warning(f"Loaded activations have {activations.shape[0]} tokens, but expected {self.total_training_tokens}.")
+        assert activations.shape[1:] == (1, self.d_in)
+        return activations
+
+    def get_data_loader(
+        self,
+    ) -> Iterator[Any]:
+        """
+        Return a torch.utils.dataloader which you can get batches from.
+
+        Should automatically refill the buffer when it gets to n % full.
+        (better mixing if you refill and shuffle regularly).
+
+        """
+
+        batch_size = self.train_batch_size_tokens
+
+        try:
+            new_samples = self.get_buffer(
+                self.half_buffer_size, raise_on_epoch_end=True
+            )
+        except StopIteration:
+            print(
+                "Warning: All samples in the training dataset have been exhausted, we are now beginning a new epoch with the same samples."
+            )
+            del self.acts_ds
+            try:
+                new_samples = self.get_buffer(self.half_buffer_size)
+            except StopIteration:
+                raise ValueError(
+                    "We were unable to fill up the buffer directly after starting a new epoch. This could indicate that there are less samples in the dataset than are required to fill up the buffer. Consider reducing batch_size or n_batches_in_buffer. "
+                )
+
+        dataloader = iter(
+            DataLoader(
+                # TODO: seems like a typing bug?
+                cast(Any, new_samples),
+                batch_size=batch_size,
+                shuffle=True,
+                collate_fn=lambda x: torch.utils.data.default_collate(x).to(self.device),
+            )
+        )
+
+        return dataloader
 
 
 def validate_pretokenized_dataset_tokenizer(
