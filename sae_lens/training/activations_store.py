@@ -28,8 +28,10 @@ from sae_lens.config import (
 from sae_lens.sae import SAE
 from sae_lens.tokenization_and_batching import concat_and_batch_sequences
 
-from learned_planners.interp.train_probes import ActivationsDataset, DatasetStore
-import wandb
+try: # local package
+    from learned_planners.interp.train_probes import ActivationsDataset, DatasetStore
+except ImportError: # public package
+    from learned_planner.interp.train_probes import ActivationsDataset, DatasetStore
 
 # TODO: Make an activation store config class to be consistent with the rest of the code.
 class ActivationsStore:

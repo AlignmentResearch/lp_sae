@@ -13,8 +13,6 @@ from transformer_lens.hook_points import HookedRootModule
 from sae_lens.sae import SAE
 from sae_lens.training.activations_store import ActivationsStore, DRCActivationsStore
 from sae_lens.evals import EvalConfig, get_eval_everything_config
-from learned_planners.interp.plot import save_video_sae as save_video_lp
-from learned_planners.interp.utils import play_level, run_fn_with_cache, load_policy
 
 from cleanba.environments import BoxobanConfig, EnvpoolBoxobanConfig
 import os
@@ -22,6 +20,13 @@ import pathlib
 import wandb
 import concurrent.futures
 import multiprocessing
+
+try: # local package
+    from learned_planners.interp.plot import plotly_feature_vis as save_video_lp
+    from learned_planners.interp.utils import play_level, run_fn_with_cache, load_policy
+except ImportError: # public package
+    from learned_planner.interp.plot import plotly_feature_vis as save_video_lp
+    from learned_planner.interp.utils import play_level, run_fn_with_cache, load_policy
 
 @torch.no_grad()
 def run_evals(
@@ -109,29 +114,26 @@ def save_video(sae_feature_activations, original_obs, sae_cfg, num_envs, lengths
     assert act_freq.shape == (sae_cfg.d_sae,)
     assert sae_feature_activations.shape == (len(original_obs) * num_envs * 10 * 10, sae_cfg.d_sae)
     sae_feature_reshaped = sae_feature_activations.reshape(len(original_obs), num_envs, 10, 10, -1)
-    sae_acts = sae_feature_reshaped[:lengths[0], 0].permute(3, 0, 1, 2)
+    sae_acts = sae_feature_reshaped[:lengths[0], 0].permute(0, 3, 1, 2).cpu()
     top_activating_features = torch.argsort(act_freq, descending=True)
     topkfeatures = 15
-    step = wandb.run.step
     videos_dict = {}
 
     multiprocessing.set_start_method("spawn", force=True)
     with concurrent.futures.ProcessPoolExecutor(max_workers=min(4, num_features_to_show // topkfeatures)) as executor:
-        futures = [
+        futures_to_idx = {
             executor.submit(
                 save_video_lp,
-                f"top_activating_features_step-{step}_start-{feature_start_idx}.mp4",
+                sae_acts[:, top_activating_features[feature_start_idx : feature_start_idx + topkfeatures]],
                 original_obs[:lengths[0], 0],
-                sae_acts[top_activating_features[feature_start_idx : feature_start_idx + topkfeatures]],
-                base_dir=wandb.run.dir + "/local-files/videos",
-                sae_feature_indices=top_activating_features[feature_start_idx : feature_start_idx + topkfeatures],
-            )
+                feature_labels=[f"F{ft_idx}" for ft_idx in top_activating_features[feature_start_idx : feature_start_idx + topkfeatures]],
+            ): feature_start_idx + topkfeatures
             for feature_start_idx in range(0, num_features_to_show, topkfeatures)
-        ]
-        for future in concurrent.futures.as_completed(futures):
-            video_path = future.result()
-            feature_start_idx = re.search(r"start-(\d+)", video_path).group(1)
-            videos_dict[f"videos/top_activating_features_start_{feature_start_idx}"] = wandb.Video(video_path, format="mp4")
+        }
+        for future in concurrent.futures.as_completed(futures_to_idx):
+            feature_end_idx = futures_to_idx[future]
+            fig = future.result()
+            videos_dict[f"videos/activating_features_top{feature_end_idx}"] = wandb.Html(fig.to_html(full_html=False), inject=False)
     return videos_dict
 
 
